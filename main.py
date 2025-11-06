@@ -1,3 +1,4 @@
+import logging
 import pandas as pd
 import numpy as np
 from openai import OpenAI
@@ -6,7 +7,76 @@ from dotenv import load_dotenv
 import os
 from sklearn.metrics.pairwise import cosine_similarity
 import json
-from typing import List, Tuple
+from typing import List, Tuple, Iterator
+
+# Метрики (импорт с безопасностью — если пакеты не установлены, фоллбек)
+_HAS_SACREBLEU = False
+_HAS_ROUGE = False
+_HAS_BERTSCORE = False
+try:
+    import sacrebleu
+    _HAS_SACREBLEU = True
+except Exception:
+    pass
+
+try:
+    from rouge_score import rouge_scorer
+    _HAS_ROUGE = True
+except Exception:
+    pass
+
+try:
+    from bert_score import score as bertscore_score
+    _HAS_BERTSCORE = True
+except Exception:
+    pass
+
+# Логирование
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
+
+
+def chunked(iterable, size: int) -> Iterator[List]:
+    """Yield successive chunks from iterable of given size."""
+    it = iter(iterable)
+    while True:
+        chunk = []
+        try:
+            for _ in range(size):
+                chunk.append(next(it))
+        except StopIteration:
+            if chunk:
+                yield chunk
+            break
+        yield chunk
+
+
+def validate_question(q: str) -> bool:
+    """Простая валидация входного вопроса."""
+    if q is None:
+        return False
+    q = str(q).strip()
+    if not q:
+        return False
+    # Ограничение по длине — можно настроить
+    if len(q) > 5000:
+        return False
+    return True
+
+
+def safe_generate(generator, retriever, question: str, top_k: int):
+    """Генерирует ответ защищённо — возвращает пустую строку при ошибке и логирует её."""
+    try:
+        if not validate_question(question):
+            logger.warning(f"Пропуск пустого или некорректного вопроса: {question}")
+            return ""
+
+        relevant_docs = retriever.retrieve_relevant_docs(question, top_k=top_k)
+        answer = generator.generate_answer(question, relevant_docs)
+        return answer
+    except Exception as e:
+        logger.exception(f"Ошибка при генерации ответа для вопроса '{question}': {e}")
+        return ""
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -157,28 +227,87 @@ class RAGAnswerGenerator:
 
 def evaluate_answers(questions_df: pd.DataFrame, retriever: DocumentRetriever) -> pd.DataFrame:
     """Добавление метрик для оценки качества"""
-    
     metrics = []
+    # Определяем имя колонки для эталонного ответа (если есть)
+    reference_col = None
+    for candidate in ['reference', 'Reference', 'Эталонный ответ', 'референс', 'Правильный ответ', 'answer_ref']:
+        if candidate in questions_df.columns:
+            reference_col = candidate
+            break
+
+    # Соберём ответы/референсы для глобальных метрик (если есть референсы)
+    all_preds = []
+    all_refs = []
+
     for idx, row in questions_df.iterrows():
-        question = row['Вопрос']
-        answer = row['Ответы на вопрос']
-        
-        # Получаем релевантные документы для анализа
-        relevant_docs = retriever.retrieve_relevant_docs(question, top_k=1)
-        top_similarity = relevant_docs[0][2] if relevant_docs else 0
-        
+        question = row.get('Вопрос')
+        answer = row.get('Ответы на вопрос', '') or ''
+
+        # Получаем релевантные документы для анализа (защищённо)
+        try:
+            relevant_docs = retriever.retrieve_relevant_docs(question, top_k=1)
+            top_similarity = relevant_docs[0][2] if relevant_docs else 0
+        except Exception as e:
+            logger.exception(f"Ошибка при получении релевантных документов для вопроса id={row.get('id')}: {e}")
+            top_similarity = 0
+
         # Простые метрики
-        answer_length = len(answer.split())
-        has_structure = any(marker in answer for marker in ['1.', '2.', '-', '•', '*'])
-        
+        answer_length = len(str(answer).split())
+        has_structure = any(marker in str(answer) for marker in ['1.', '2.', '-', '•', '*'])
+
         metrics.append({
-            'question_id': row['id'],
+            'question_id': row.get('id'),
             'answer_length': answer_length,
             'has_structure': has_structure,
             'top_doc_similarity': top_similarity
         })
-    
+
+        all_preds.append(str(answer))
+        if reference_col:
+            all_refs.append(str(row.get(reference_col)))
+
     metrics_df = pd.DataFrame(metrics)
+
+    # Глобальные метрики: BLEU / ROUGE / BERTScore (если есть референсы и установленные библиотеки)
+    global_metrics = {}
+    if reference_col and len(all_refs) == len(all_preds) and len(all_preds) > 0:
+        # BLEU
+        if _HAS_SACREBLEU:
+            try:
+                bleu = sacrebleu.corpus_bleu(all_preds, [all_refs])
+                global_metrics['bleu_score'] = float(bleu.score)
+            except Exception:
+                logger.exception("Ошибка при вычислении BLEU")
+        else:
+            logger.info("sacrebleu не установлен — BLEU будет пропущен")
+
+        # ROUGE (rouge-l f1)
+        if _HAS_ROUGE:
+            try:
+                scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+                scores = [scorer.score(r, p)['rougeL'].fmeasure for r, p in zip(all_refs, all_preds)]
+                global_metrics['rougeL_f1_mean'] = float(np.mean(scores)) if scores else 0.0
+            except Exception:
+                logger.exception("Ошибка при вычислении ROUGE")
+        else:
+            logger.info("rouge_score не установлен — ROUGE будет пропущен")
+
+        # BERTScore
+        if _HAS_BERTSCORE:
+            try:
+                P, R, F1 = bertscore_score(all_preds, all_refs, lang='ru' if any('а' <= c <= 'я' or 'А' <= c <= 'Я' for s in all_refs for c in s) else 'en', rescale_with_baseline=True)
+                global_metrics['bertscore_f1_mean'] = float(F1.mean().cpu().numpy())
+            except Exception:
+                logger.exception("Ошибка при вычислении BERTScore")
+        else:
+            logger.info("bert-score не установлен — BERTScore будет пропущен")
+    else:
+        logger.info("Референсы для вычисления BLEU/ROUGE/BERTScore не найдены — эти метрики будут пропущены")
+
+    # Приклеим глобальные метрики к таблице (как отдельные колонки с одинаковыми значениями)
+    for k, v in global_metrics.items():
+        metrics_df[k] = v
+
     return metrics_df
 
 
@@ -210,23 +339,35 @@ if __name__ == "__main__":
     questions = pd.read_csv('./questions.csv')
     questions_list = questions['Вопрос'].tolist()
     
-    # Генерация ответов
-    print("\n4. Генерация ответов с использованием RAG...")
+    # Генерация ответов (батчами)
+    print("\n4. Генерация ответов с использованием RAG (батчами)...")
     answer_list = []
     relevant_docs_info = []
-    
-    for current_question in tqdm(questions_list, desc="Обработка вопросов"):
-        # Поиск релевантных документов
-        relevant_docs = retriever.retrieve_relevant_docs(current_question, top_k=TOP_K_DOCUMENTS)
-        
-        # Генерация ответа с контекстом
-        answer = generator.generate_answer(current_question, relevant_docs)
-        
-        answer_list.append(answer)
-        relevant_docs_info.append({
-            'top_similarity': relevant_docs[0][2],
-            'used_docs': [doc[0] for doc in relevant_docs]
-        })
+    batch_size = 8  # можно увеличить при хорошем rate-limit
+
+    total_questions = len(questions_list)
+    processed = 0
+    for batch_idx, batch in enumerate(chunked(questions_list, batch_size), 1):
+        logger.info(f"Обработка батча {batch_idx}: вопросов {len(batch)} (всего обработано {processed}/{total_questions})")
+        for q in batch:
+            answer = safe_generate(generator, retriever, q, top_k=TOP_K_DOCUMENTS)
+            # Постобработка: попытка получить релевантные документы для метаданных (защищённо)
+            try:
+                docs = retriever.retrieve_relevant_docs(q, top_k=TOP_K_DOCUMENTS)
+                top_similarity = docs[0][2] if docs else 0
+                used_docs = [doc[0] for doc in docs]
+            except Exception:
+                top_similarity = 0
+                used_docs = []
+
+            answer_list.append(answer)
+            relevant_docs_info.append({
+                'top_similarity': top_similarity,
+                'used_docs': used_docs
+            })
+            processed += 1
+        # Небольшая пауза можно добавить при необходимости rate-limit'а
+    logger.info(f"Генерация завершена: создано ответов {len(answer_list)}")
     
     # Добавление ответов
     questions['Ответы на вопрос'] = answer_list

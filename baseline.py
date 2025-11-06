@@ -1,8 +1,19 @@
+import logging
 import pandas as pd
 from openai import OpenAI
 from tqdm import tqdm
 from dotenv import load_dotenv
 import os
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
+
+
+def validate_question_simple(q):
+    if q is None:
+        return False
+    q = str(q).strip()
+    return bool(q)
 
 # Подключаем все переменные из окружения
 load_dotenv()
@@ -23,25 +34,34 @@ def answer_generation(question):
         # Указываем наш ключ, полученный ранее
         api_key=LLM_API_KEY,
     )
-    # Формируем запрос к клиенту
-    response = client.chat.completions.create(
-        # Выбираем любую допступную модель из предоставленного списка
-        model="openrouter/mistralai/mistral-small-3.2-24b-instruct",
-        # Формируем сообщение
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"Ответь на вопрос: {question}"
-                    }
-                ]
-            }
-        ]
-    )
-    # Формируем ответ на запрос и возвращаем его в результате работы функции
-    return response.choices[0].message.content
+    # Простая валидация
+    if not validate_question_simple(question):
+        logger.warning("Пустой или некорректный вопрос передан в answer_generation")
+        return ""
+
+    try:
+        # Формируем запрос к клиенту
+        response = client.chat.completions.create(
+            # Выбираем любую допступную модель из предоставленного списка
+            model="openrouter/mistralai/mistral-small-3.2-24b-instruct",
+            # Формируем сообщение
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Ответь на вопрос: {question}"
+                        }
+                    ]
+                }
+            ]
+        )
+        # Формируем ответ на запрос и возвращаем его в результате работы функции
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.exception(f"Ошибка при вызове LLM для вопроса: {e}")
+        return ""
 
 
 # Блок кода для запуска. Пожалуйста оставляйте его в самом низу вашего скрипта,
