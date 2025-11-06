@@ -248,7 +248,7 @@ def evaluate_answers(questions_df: pd.DataFrame, retriever: DocumentRetriever) -
             relevant_docs = retriever.retrieve_relevant_docs(question, top_k=1)
             top_similarity = relevant_docs[0][2] if relevant_docs else 0
         except Exception as e:
-            logger.exception(f"Ошибка при получении релевантных документов для вопроса id={row.get('id')}: {e}")
+            logger.exception(f"Ошибка при получении релевантных документов для вопроса id={row.get('ID вопроса')}: {e}")
             top_similarity = 0
 
         # Простые метрики
@@ -256,7 +256,7 @@ def evaluate_answers(questions_df: pd.DataFrame, retriever: DocumentRetriever) -
         has_structure = any(marker in str(answer) for marker in ['1.', '2.', '-', '•', '*'])
 
         metrics.append({
-            'question_id': row.get('id'),
+            'question_id': row.get('ID вопроса'),
             'answer_length': answer_length,
             'has_structure': has_structure,
             'top_doc_similarity': top_similarity
