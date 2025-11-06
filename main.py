@@ -329,14 +329,14 @@ if __name__ == "__main__":
     
     # Загрузка и подготовка базы знаний
     print("\n1. Загрузка базы знаний...")
-    retriever.load_documents('./train_data.csv')
+    retriever.load_documents('./data/train_data.csv')
     
     print("\n2. Создание эмбеддингов...")
     retriever.create_embeddings()
     
     # Загрузка вопросов
     print("\n3. Загрузка вопросов...")
-    questions = pd.read_csv('./questions.csv')
+    questions = pd.read_csv('./data/questions.csv')
     questions_list = questions['Вопрос'].tolist()
     
     # Генерация ответов (батчами)
@@ -387,12 +387,12 @@ if __name__ == "__main__":
     
     # Сохранение результатов
     print("\n6. Сохранение результатов...")
-    questions.to_csv('submission.csv', index=False)
-    metrics_df.to_csv('evaluation_metrics.csv', index=False)
+    questions.to_csv('./data/submission.csv', index=False)
+    metrics_df.to_csv('./data/evaluation_metrics.csv', index=False)
     
     print("\n" + "=" * 50)
     print("✓ Готово! Файлы сохранены:")
-    print("  - submission.csv (основной файл с ответами)")
-    print("  - evaluation_metrics.csv (метрики качества)")
+    print("  - data/submission.csv (основной файл с ответами)")
+    print("  - data/evaluation_metrics.csv (метрики качества)")
     print("  - doc_embeddings.json (кэш эмбеддингов)")
     print("=" * 50)
